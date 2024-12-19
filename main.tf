@@ -1,17 +1,9 @@
 resource "aws_vpc_peering_connection" "default" {
+  provider    = aws.requestor
   count       = module.this.enabled ? 1 : 0
   vpc_id      = join("", data.aws_vpc.requestor[*].id)
   peer_vpc_id = join("", data.aws_vpc.acceptor[*].id)
-
-  auto_accept = var.auto_accept
-
-  accepter {
-    allow_remote_vpc_dns_resolution = var.acceptor_allow_remote_vpc_dns_resolution
-  }
-
-  requester {
-    allow_remote_vpc_dns_resolution = var.requestor_allow_remote_vpc_dns_resolution
-  }
+  peer_region = data.aws_region.acceptor[0].name
 
   tags = module.this.tags
 
@@ -22,30 +14,70 @@ resource "aws_vpc_peering_connection" "default" {
   }
 }
 
+resource "aws_vpc_peering_connection_accepter" "acceptor" {
+  provider                  = aws.acceptor
+  count                     = module.this.enabled ? 1 : 0
+  vpc_peering_connection_id = aws_vpc_peering_connection.default[0].id
+  auto_accept               = var.auto_accept
+}
+
+resource "aws_vpc_peering_connection_options" "requestor" {
+  provider = aws.requestor
+
+  # As options can't be set until the connection has been accepted
+  # create an explicit dependency on the acceptor.
+  vpc_peering_connection_id = aws_vpc_peering_connection_accepter.acceptor[0].id
+
+  requester {
+    allow_remote_vpc_dns_resolution = var.requestor_allow_remote_vpc_dns_resolution
+  }
+}
+
+resource "aws_vpc_peering_connection_options" "acceptor" {
+  provider = aws.acceptor
+
+  # As options can't be set until the connection has been accepted
+  # create an explicit dependency on the acceptor.
+  vpc_peering_connection_id = aws_vpc_peering_connection_accepter.acceptor[0].id
+
+  accepter {
+    allow_remote_vpc_dns_resolution = var.acceptor_allow_remote_vpc_dns_resolution
+  }
+}
+
+data "aws_region" "acceptor" {
+  provider = aws.acceptor
+  count    = module.this.enabled ? 1 : 0
+}
+
 # Lookup requestor VPC so that we can reference the CIDR
 data "aws_vpc" "requestor" {
-  count = module.this.enabled ? 1 : 0
-  id    = var.requestor_vpc_id
-  tags  = var.requestor_vpc_tags
+  provider = aws.requestor
+  count    = module.this.enabled ? 1 : 0
+  id       = var.requestor_vpc_id
+  tags     = var.requestor_vpc_tags
 }
 
 # Lookup acceptor VPC so that we can reference the CIDR
 data "aws_vpc" "acceptor" {
-  count = module.this.enabled ? 1 : 0
-  id    = var.acceptor_vpc_id
-  tags  = var.acceptor_vpc_tags
+  provider = aws.acceptor
+  count    = module.this.enabled ? 1 : 0
+  id       = var.acceptor_vpc_id
+  tags     = var.acceptor_vpc_tags
 }
 
 data "aws_route_tables" "requestor" {
-  count  = module.this.enabled ? 1 : 0
-  vpc_id = join("", data.aws_vpc.requestor[*].id)
-  tags   = var.requestor_route_table_tags
+  provider = aws.requestor
+  count    = module.this.enabled ? 1 : 0
+  vpc_id   = join("", data.aws_vpc.requestor[*].id)
+  tags     = var.requestor_route_table_tags
 }
 
 data "aws_route_tables" "acceptor" {
-  count  = module.this.enabled ? 1 : 0
-  vpc_id = join("", data.aws_vpc.acceptor[*].id)
-  tags   = var.acceptor_route_table_tags
+  provider = aws.acceptor
+  count    = module.this.enabled ? 1 : 0
+  vpc_id   = join("", data.aws_vpc.acceptor[*].id)
+  tags     = var.acceptor_route_table_tags
 }
 
 locals {
@@ -59,6 +91,7 @@ locals {
 
 # Create routes from requestor to acceptor
 resource "aws_route" "requestor" {
+  provider                  = aws.requestor
   count                     = module.this.enabled ? length(distinct(sort(data.aws_route_tables.requestor[0].ids))) * length(local.acceptor_cidr_blocks) : 0
   route_table_id            = element(distinct(sort(data.aws_route_tables.requestor[0].ids)), ceil(count.index / length(local.acceptor_cidr_blocks)))
   destination_cidr_block    = local.acceptor_cidr_blocks[count.index % length(local.acceptor_cidr_blocks)]
@@ -68,6 +101,7 @@ resource "aws_route" "requestor" {
 
 # Create routes from acceptor to requestor
 resource "aws_route" "acceptor" {
+  provider                  = aws.acceptor
   count                     = module.this.enabled ? length(distinct(sort(data.aws_route_tables.acceptor[0].ids))) * length(local.requestor_cidr_blocks) : 0
   route_table_id            = element(distinct(sort(data.aws_route_tables.acceptor[0].ids)), ceil(count.index / length(local.requestor_cidr_blocks)))
   destination_cidr_block    = local.requestor_cidr_blocks[count.index % length(local.requestor_cidr_blocks)]
